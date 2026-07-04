@@ -1,34 +1,23 @@
-cat > /root/proxmox-auto-install-final.sh << 'EOF'
+cat > /root/proxmox-auto-install-fixed.sh << 'EOF'
 #!/bin/bash
 # ======================================================================
-# PROXMOX AUTO INSTALL – FINAL ULTIMATE VERSION
+# PROXMOX AUTO INSTALL – FIXED VERSION (with filter)
 # ======================================================================
-# Usage:
-#   ./proxmox-auto-install-final.sh          # interactive (asks questions)
-#   ./proxmox-auto-install-final.sh --auto   # fully automatic (uses saved config)
+# Fixed: added filter = "none" to [disk-setup] section
 # ======================================================================
 
 set -euo pipefail
 
-# ---- Colors ----
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 error_exit() { echo -e "${RED}❌ ERROR: $*${NC}" >&2; exit 1; }
 info() { echo -e "${GREEN}>>> $*${NC}"; }
 warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
 step() { echo -e "${CYAN}▶ $*${NC}"; }
 ok() { echo -e "${GREEN}✅ $*${NC}"; }
 
-# ---- Auto mode ----
 AUTO=0
 [[ "${1:-}" == "--auto" ]] && AUTO=1
 
-# ---- Confirm function ----
 confirm() {
     if [[ $AUTO -eq 1 ]]; then
         echo -e "${GREEN}✓${NC} $1 (y/n): y (auto-mode)"
@@ -44,12 +33,10 @@ confirm() {
     done
 }
 
-# ---- Helper functions ----
 normalize_disk() { [[ "$1" != /dev/* ]] && echo "/dev/$1" || echo "$1"; }
 disk_exists() { [[ -b "$1" ]]; }
 is_same_disk() { [[ "$(readlink -f "$1")" == "$(readlink -f "$2")" ]]; }
 
-# ---- Validate functions ----
 validate_keyboard() {
     local kb="$1"
     local valid=("de" "de-ch" "dk" "en-gb" "en-us" "es" "fi" "fr" "fr-be" "fr-ca" "fr-ch" "hu" "is" "it" "jp" "lt" "mk" "nl" "no" "pl" "pt" "pt-br" "se" "si" "tr")
@@ -59,13 +46,7 @@ validate_keyboard() {
     return 1
 }
 
-validate_ip() {
-    local ip="$1"
-    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || return 1
-    return 0
-}
-
-# ---- Fix functions for answer.toml ----
+# ---- FIX: Přidá filter ----
 fix_answer_file() {
     local f="$1"
     
@@ -107,6 +88,12 @@ fix_answer_file() {
         sed -i '/^zfs.raid/d' "$f"
         sed -i "/^\[disk-setup\]/a zfs.raid = \"raid0\"" "$f"
     fi
+    
+    # ==== FIX: Přidá filter = "none" pokud chybí ====
+    if grep -q '^\[disk-setup\]' "$f" && ! grep -q '^filter' "$f"; then
+        warn "Přidávám filter = \"none\" do [disk-setup]"
+        sed -i "/^\[disk-setup\]/a filter = \"none\"" "$f"
+    fi
 }
 
 # ---- Main ----
@@ -114,27 +101,23 @@ if [[ $EUID -ne 0 ]]; then
     error_exit "Run as root: sudo $0"
 fi
 
-# ---- Banner ----
 echo ""
 echo "============================================================"
-echo "  🔥 PROXMOX AUTO INSTALL – FINAL ULTIMATE VERSION"
+echo "  🔥 PROXMOX AUTO INSTALL – FIXED VERSION"
 echo "============================================================"
 echo ""
 
-# ---- Install dependencies ----
 step "Installing dependencies..."
 apt update -qq && apt install -y wget xorriso smartmontools proxmox-auto-install-assistant 2>/dev/null || {
     error_exit "Failed to install dependencies"
 }
 ok "Dependencies installed"
 
-# ---- Working directory ----
 WORK_DIR="/root/proxmox-automation"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 CONFIG_FILE="$WORK_DIR/config.cfg"
 
-# ---- Load or create config ----
 if [[ -f "$CONFIG_FILE" ]] && [[ $AUTO -eq 1 ]]; then
     step "Loading saved config..."
     source "$CONFIG_FILE"
@@ -150,65 +133,41 @@ else
     CONFIG_LOADED=0
 fi
 
-# ---- Interactive questions (if not auto or no config) ----
 if [[ $CONFIG_LOADED -eq 0 ]]; then
     if [[ $AUTO -eq 1 ]]; then
-        error_exit "No config found. Run interactively first to create config, or use --auto after config exists."
+        error_exit "No config found. Run interactively first."
     fi
     
     step "Please provide installation parameters."
     echo ""
-    
-    # Show disks
     lsblk -o NAME,SIZE,MODEL,MOUNTPOINT
     echo ""
-    
-    # System disk
     read -p "SYSTEM disk (e.g. nvme0n1, /dev/sda): " SYSTEM_DISK_RAW
     SYSTEM_DISK=$(normalize_disk "$SYSTEM_DISK_RAW")
     disk_exists "$SYSTEM_DISK" || error_exit "Disk $SYSTEM_DISK does not exist"
-    
-    # Data disks
     read -p "DATA disks (space-separated, or empty): " data_input
     DATA_DISKS=()
     for d in $data_input; do
         d=$(normalize_disk "$d")
         disk_exists "$d" && DATA_DISKS+=("$d") || warn "$d does not exist (skipped)"
     done
-    
-    # Hostname
     read -p "Hostname (FQDN, e.g. pve.domain.com): " HOSTNAME
     [[ -z "$HOSTNAME" ]] && error_exit "Hostname is required"
     [[ "$HOSTNAME" != *.* ]] && HOSTNAME="${HOSTNAME}.local"
-    
-    # Password
     read -sp "Root password: " ROOT_PASSWORD; echo
     [[ -z "$ROOT_PASSWORD" ]] && error_exit "Password is required"
     read -sp "Confirm password: " ROOT_PASSWORD2; echo
     [[ "$ROOT_PASSWORD" != "$ROOT_PASSWORD2" ]] && error_exit "Passwords do not match"
-    
-    # Timezone
     read -p "Timezone (Europe/Prague): " TIMEZONE
     TIMEZONE="${TIMEZONE:-Europe/Prague}"
-    
-    # Keyboard
     echo "Valid keyboards: de, de-ch, dk, en-gb, en-us, es, fi, fr, fr-be, fr-ca, fr-ch, hu, is, it, jp, lt, mk, nl, no, pl, pt, pt-br, se, si, tr"
     read -p "Keyboard layout (en-us): " KEYBOARD
     KEYBOARD="${KEYBOARD:-en-us}"
-    validate_keyboard "$KEYBOARD" || warn "Invalid keyboard '$KEYBOARD' – using 'en-us'"
-    if ! validate_keyboard "$KEYBOARD"; then
-        KEYBOARD="en-us"
-    fi
-    
-    # Country
+    validate_keyboard "$KEYBOARD" || { warn "Invalid keyboard '$KEYBOARD' – using 'en-us'"; KEYBOARD="en-us"; }
     read -p "Country code (cz): " COUNTRY
     COUNTRY="${COUNTRY:-cz}"
-    
-    # Email
     read -p "Email for notifications (root@$HOSTNAME): " MAILTO
     MAILTO="${MAILTO:-root@$HOSTNAME}"
-    
-    # Network
     read -p "Network – DHCP (d) or static (s)? " net
     net=$(echo "$net" | tr '[:upper:]' '[:lower:]')
     if [[ "$net" == "d" || "$net" == "dhcp" ]]; then
@@ -216,23 +175,17 @@ if [[ $CONFIG_LOADED -eq 0 ]]; then
     else
         NET_SOURCE="static"
         read -p "IP with prefix (e.g. 192.168.1.100/24): " IP_CIDR
-        validate_ip "$IP_CIDR" || warn "Invalid IP format, but continuing..."
         read -p "Gateway (e.g. 192.168.1.1): " GATEWAY
         read -p "DNS (e.g. 8.8.8.8): " DNS
     fi
-    
-    # Filesystem
     read -p "Filesystem (ext4/xfs/zfs) [ext4]: " FILESYSTEM
     FILESYSTEM="${FILESYSTEM:-ext4}"
     if [[ ! "$FILESYSTEM" =~ ^(ext4|xfs|zfs)$ ]]; then
         warn "Invalid filesystem '$FILESYSTEM' – using ext4"
         FILESYSTEM="ext4"
     fi
-    
-    # USB
     confirm "Write ISO to USB?" && write_usb="a" || write_usb="n"
     
-    # Save config
     cat > "$CONFIG_FILE" <<EOC
 SYSTEM_DISK="$SYSTEM_DISK"
 DATA_DISKS=(${DATA_DISKS[*]})
@@ -252,7 +205,6 @@ EOC
     ok "Config saved to $CONFIG_FILE"
 fi
 
-# ---- Display summary ----
 echo ""
 echo "============================================================"
 echo "  📋 CONFIGURATION SUMMARY"
@@ -267,21 +219,19 @@ echo "  Keyboard:      $KEYBOARD"
 echo "============================================================"
 echo ""
 
-# ---- ISO download ----
 step "Checking Proxmox ISO..."
 ISO_FILE="$WORK_DIR/proxmox-ve_9.2-1.iso"
 if [[ -f "$ISO_FILE" ]]; then
     ok "ISO already exists: $ISO_FILE"
 else
-    info "Downloading Proxmox ISO (1.6GB)... This may take a while."
+    info "Downloading Proxmox ISO (1.6GB)..."
     wget -O "$ISO_FILE" "https://enterprise.proxmox.com/iso/proxmox-ve_9.2-1.iso" --progress=dot:giga || {
         error_exit "Download failed"
     }
     ok "ISO downloaded"
 fi
 
-# ---- Create answer.toml ----
-step "Creating answer.toml..."
+step "Creating answer.toml with filter..."
 ANSWER_FILE="$WORK_DIR/answer.toml"
 
 if [[ "$NET_SOURCE" == "dhcp" ]]; then
@@ -310,13 +260,12 @@ source = "$NET_SRC"$NET_EXTRA
 [disk-setup]
 filesystem = "$FILESYSTEM"
 disk-list = ["$SYSTEM_DISK"]
+filter = "none"
 EOA
 
-# Fix answer file
 fix_answer_file "$ANSWER_FILE"
-ok "answer.toml created"
+ok "answer.toml created with filter = \"none\""
 
-# ---- Create automated ISO ----
 CUSTOM_ISO="$WORK_DIR/proxmox-automated.iso"
 if [[ -f "$CUSTOM_ISO" ]]; then
     ok "Automated ISO already exists: $CUSTOM_ISO"
@@ -339,14 +288,7 @@ else
             echo "$output"
             warn "Preparation failed."
         fi
-        # Auto-fix common errors
-        if grep -q "unknown variant" <<< "$output" || grep -q "zfs.raid" <<< "$output"; then
-            fix_answer_file "$ANSWER_FILE"
-        elif grep -q "root-credentials" <<< "$output"; then
-            fix_answer_file "$ANSWER_FILE"
-        elif grep -q "unknown field" <<< "$output"; then
-            fix_answer_file "$ANSWER_FILE"
-        fi
+        fix_answer_file "$ANSWER_FILE"
     done
     if [[ $PREPARED -eq 0 ]]; then
         warn "Failed to create automated ISO after 3 attempts."
@@ -358,7 +300,6 @@ else
     fi
 fi
 
-# ---- Write to USB ----
 USB_WRITTEN_FLAG="$WORK_DIR/usb-written"
 if [[ -f "$USB_WRITTEN_FLAG" ]]; then
     ok "USB already written (flag exists). Skipping."
@@ -412,7 +353,6 @@ else
     fi
 fi
 
-# ---- Erase data disks ----
 if [[ ${#DATA_DISKS[@]} -gt 0 ]]; then
     echo ""
     warn "DATA DISKS TO ERASE: ${DATA_DISKS[*]}"
@@ -431,7 +371,6 @@ if [[ ${#DATA_DISKS[@]} -gt 0 ]]; then
     fi
 fi
 
-# ---- Erase system disk ----
 echo ""
 warn "ERASING SYSTEM DISK: $SYSTEM_DISK (including boot sector)"
 if confirm "Are you absolutely sure?"; then
@@ -443,7 +382,6 @@ else
     error_exit "Aborted by user"
 fi
 
-# ---- SMART check ----
 echo ""
 step "Performing S.M.A.R.T. check..."
 for disk in /dev/sd? /dev/nvme?n?; do
@@ -453,7 +391,6 @@ for disk in /dev/sd? /dev/nvme?n?; do
     smartctl -H "$disk" 2>/dev/null | grep "SMART overall-health" || echo "SMART not supported"
 done
 
-# ---- Final ----
 echo ""
 echo "============================================================"
 echo "  ✅ DONE – READY FOR PROXMOX INSTALLATION"
@@ -475,10 +412,9 @@ echo "  🤖 Auto mode:    sudo $0 --auto"
 echo "============================================================"
 EOF
 
-chmod +x /root/proxmox-auto-install-final.sh
+chmod +x /root/proxmox-auto-install-fixed.sh
 echo ""
-echo "✅ FINAL SKRIPT VYTVOŘEN: /root/proxmox-auto-install-final.sh"
+echo "✅ OPRAVENÝ SKRIPT VYTVOŘEN: /root/proxmox-auto-install-fixed.sh"
 echo ""
 echo "SPUŠTĚNÍ:"
-echo "  sudo /root/proxmox-auto-install-final.sh          # interaktivní režim"
-echo "  sudo /root/proxmox-auto-install-final.sh --auto   # automatický režim"
+echo "  sudo /root/proxmox-auto-install-fixed.sh --auto"
