@@ -28,6 +28,17 @@ Děkuji za zpětnou vazbu – vidím, že skript správně detekoval USB disk `s
 4. **Odpovídejte na otázky** – skript sám detekuje USB, stáhne ISO, připraví konfiguraci a zapíše ISO na USB.
 5. Po dokončení **restartujte** server a nabootujte z USB. Instalace Proxmoxu proběhne automaticky.
 
+Po instalaci (nový systém)
+
+Přihlaste se jako root.
+
+Stáhněte druhý skript na server (např. pomocí wget nebo SCP).
+
+Upravte proměnné na začátku skriptu (heslo admina, SSH klíč, seznam ISO, disky pro Ceph).
+
+Spusťte: chmod +x proxmox-post-install.sh && sudo ./proxmox-post-install.sh
+
+Skript provede veškerou konfiguraci automaticky. V případě chyby se zastaví a zobrazí hlášku – můžete opravit a spustit znovu (mnoho kroků je idempotentních).
 ---
 
 ## 🧩 Co je nového / vylepšeného
@@ -61,5 +72,31 @@ if [[ "$1" == "--auto" ]]; then
     # přeskočit dotazování
 fi
 ```
+
+
+⚙️ Co skript dělá podrobně
+Krok	Popis
+Repozitáře	Zakáže enterprise, přidá no-subscription a Ceph quincy.
+Aktualizace	apt update && upgrade -y.
+Nástroje	Nainstaluje htop, vim, curl, git, fail2ban, cockpit, netdata, ufw.
+SSH	Povolí root přihlášení (volitelně upravte).
+Uživatel admin	Vytvoří uživatele s heslem a SSH klíčem (pro bezpečnější přístup).
+Firewall	Povolí porty 22, 8006, 3306 a zapne UFW.
+fail2ban	Spustí a povolí.
+ISO	Stáhne zadané ISO obrazy do /var/lib/vz/template/iso (pro VM).
+Ceph	Inicializuje Ceph cluster na jednom uzlu (mon, mgr, OSD na zadaných discích, vytvoří CephFS).
+Datacentrové předvolby	Nastaví výchozí úložiště, HA, email, metric server, vytvoří složky.
+🔧 Přizpůsobení
+Změňte proměnné na začátku skriptu (hesla, disky, IP sítě).
+
+Pro Ceph na jednom uzlu stačí 1 OSD – doporučuji alespoň 2 disky pro replikaci.
+
+Pokud nechcete Ceph, nechte pole CEPH_DISKS=() prázdné.
+
+Seznam ISO můžete upravit dle potřeby.
+
+Skript je navržen tak, aby byl bezpečný – před každou destruktivní operací se ptá (kromě instalace balíčků). V produkčním prostředí doporučuji proměnné pevně nastavit a spustit v režimu bez interakce.
+
+
 
 Tím získáte plně automatizovaný nástroj pro přípravu USB.
