@@ -1,4 +1,3 @@
-cat > /root/proxmox-auto-install-fixed.sh << 'EOF'
 #!/bin/bash
 # ======================================================================
 # PROXMOX AUTO INSTALL – FIXED VERSION (with filter)
@@ -46,7 +45,7 @@ validate_keyboard() {
     return 1
 }
 
-# ---- FIX: Přidá filter ----
+# ---- FIX: Oprava answer.toml ----
 fix_answer_file() {
     local f="$1"
     
@@ -58,7 +57,7 @@ fix_answer_file() {
         fi
     fi
     
-    # Fix root-credentials -> root-password
+    # Fix root-credentials -> root-password (pouze pro staré verze)
     if grep -q '^\[root-credentials\]' "$f"; then
         local pass=$(sed -n '/^\[root-credentials\]/,/^\[/p' "$f" | grep '^password' | head -1 | cut -d= -f2 | xargs | tr -d '"')
         sed -i '/^\[root-credentials\]/,/^\[/d' "$f"
@@ -83,16 +82,38 @@ fix_answer_file() {
         else sed -i "/^\[disk-setup\]/a disk-list = [\"$disk\"]" "$f"; fi
     fi
     
-    # Fix ZFS raid
+    # Fix ZFS raid (pouze pokud existuje filesystem = zfs a chybí zfs.raid)
     if grep -q '^filesystem *= *"zfs"' "$f"; then
-        sed -i '/^zfs.raid/d' "$f"
-        sed -i "/^\[disk-setup\]/a zfs.raid = \"raid0\"" "$f"
+        if ! grep -q '^zfs.raid' "$f"; then
+            warn "Přidávám zfs.raid = \"raid0\""
+            sed -i "/^\[disk-setup\]/a zfs.raid = \"raid0\"" "$f"
+        fi
     fi
     
-    # ==== FIX: Přidá filter = "none" pokud chybí ====
-    if grep -q '^\[disk-setup\]' "$f" && ! grep -q '^filter' "$f"; then
-        warn "Přidávám filter = \"none\" do [disk-setup]"
-        sed -i "/^\[disk-setup\]/a filter = \"none\"" "$f"
+    # Přidá filter = "none" pokud chybí (ale NEPŘIDÁVAT DUPLICITU)
+    if grep -q '^\[disk-setup\]' "$f"; then
+        if ! grep -q '^filter' "$f"; then
+            warn "Přidávám filter = \"none\" do [disk-setup]"
+            sed -i "/^\[disk-setup\]/a filter = \"none\"" "$f"
+        fi
+    fi
+    
+    # ZAJIŠTĚNÍ SPRÁVNÉHO POŘADÍ: filesystem, disk-list, zfs.raid, filter
+    # Pokud existuje zfs.raid a filter, zajistíme správné pořadí
+    if grep -q '^zfs.raid' "$f" && grep -q '^filter' "$f"; then
+        # Kontrola, zda je filter za zfs.raid
+        local fs_line=$(grep -n '^filesystem' "$f" | cut -d: -f1 | head -1)
+        local dl_line=$(grep -n '^disk-list' "$f" | cut -d: -f1 | head -1)
+        local zfs_line=$(grep -n '^zfs.raid' "$f" | cut -d: -f1 | head -1)
+        local flt_line=$(grep -n '^filter' "$f" | cut -d: -f1 | head -1)
+        
+        # Pokud je filter před zfs.raid, přesuneme ho za
+        if [[ $flt_line -lt $zfs_line ]]; then
+            warn "Přesouvám filter za zfs.raid"
+            local filter_val=$(grep '^filter' "$f" | cut -d= -f2 | xargs)
+            sed -i "/^filter/d" "$f"
+            sed -i "/^zfs.raid/a filter = $filter_val" "$f"
+        fi
     fi
 }
 
@@ -231,9 +252,14 @@ else
     ok "ISO downloaded"
 fi
 
-step "Creating answer.toml with filter..."
+# ======================================================================
+# ==== OPRAVENÝ answer.toml – SPRÁVNÁ SYNTAXE ====
+# ======================================================================
+step "Creating answer.toml with correct syntax..."
+
 ANSWER_FILE="$WORK_DIR/answer.toml"
 
+# Zjištění správné hodnoty source
 if [[ "$NET_SOURCE" == "dhcp" ]]; then
     NET_SRC="from-dhcp"
     NET_EXTRA=""
@@ -245,6 +271,7 @@ gateway = \"$GATEWAY\"
 dns = \"$DNS\""
 fi
 
+# ==== SPRÁVNÝ answer.toml (kompletní, s filter = "none") ====
 cat > "$ANSWER_FILE" <<EOA
 [global]
 keyboard = "$KEYBOARD"
@@ -263,9 +290,24 @@ disk-list = ["$SYSTEM_DISK"]
 filter = "none"
 EOA
 
+# PŘIDÁNÍ zfs.raid POUZE PRO ZFS
+if [[ "$FILESYSTEM" == "zfs" ]]; then
+    # Přidáme za disk-list, před filter
+    sed -i '/^disk-list/a zfs.raid = "raid0"' "$ANSWER_FILE"
+    info "Přidán zfs.raid = \"raid0\" pro ZFS"
+fi
+
+# Kontrola, že answer.toml je validní
+info "Kontrola answer.toml:"
+echo "────────────────────────────────────────────────────────────"
+cat "$ANSWER_FILE"
+echo "────────────────────────────────────────────────────────────"
+
+# ---- Pouze lehká oprava, bez zbytečných úprav ----
 fix_answer_file "$ANSWER_FILE"
 ok "answer.toml created with filter = \"none\""
 
+# ---- Vytvoření automatického ISO ----
 CUSTOM_ISO="$WORK_DIR/proxmox-automated.iso"
 if [[ -f "$CUSTOM_ISO" ]]; then
     ok "Automated ISO already exists: $CUSTOM_ISO"
@@ -288,7 +330,14 @@ else
             echo "$output"
             warn "Preparation failed."
         fi
-        fix_answer_file "$ANSWER_FILE"
+        # Oprava podle chyby
+        if grep -q "zfs.raid" <<< "$output"; then
+            sed -i '/^zfs.raid/d' "$ANSWER_FILE"
+            sed -i '/^disk-list/a zfs.raid = "raid0"' "$ANSWER_FILE"
+        elif grep -q "filter" <<< "$output"; then
+            sed -i '/^filter/d' "$ANSWER_FILE"
+            sed -i '/^disk-list/a filter = "none"' "$ANSWER_FILE"
+        fi
     done
     if [[ $PREPARED -eq 0 ]]; then
         warn "Failed to create automated ISO after 3 attempts."
@@ -300,6 +349,7 @@ else
     fi
 fi
 
+# ---- Zbytek skriptu (USB zápis, mazání disků, SMART) ----
 USB_WRITTEN_FLAG="$WORK_DIR/usb-written"
 if [[ -f "$USB_WRITTEN_FLAG" ]]; then
     ok "USB already written (flag exists). Skipping."
